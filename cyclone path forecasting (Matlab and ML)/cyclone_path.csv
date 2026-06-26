@@ -1,0 +1,295 @@
+%% cyclone_predict_fullpath_map_integrated.m
+clear; clc; close all;
+
+env_file  = 'cyclone_data.csv';
+path_file = 'cyclone_sidr_path_with_time.csv';
+Hf_future = 3;
+minPointsToFit = 10;
+pause_sec = 0.12;
+predict_mode = 'delta';
+latLim = [10 25];
+lonLim = [85 95];
+landColor  = [0.4 0.8 0.4];
+oceanColor = [0.6 0.85 1];
+
+if ~isfile(env_file), error('Env file not found: %s', env_file); end
+if ~isfile(path_file), error('Path file not found: %s', path_file); end
+T_env  = readtable(env_file);
+T_path = readtable(path_file);
+
+latCols = {'lat','latitude','Lat','Latitude'};
+lonCols = {'lon','longitude','Lon','Longitude'};
+tmpLat = intersect(latCols, T_path.Properties.VariableNames);
+tmpLon = intersect(lonCols, T_path.Properties.VariableNames);
+
+if isempty(tmpLat) || isempty(tmpLon)
+    error('Path CSV must contain lat/lon columns.');
+end
+
+T_path = rmmissing(T_path, 'DataVariables', {tmpLat{1}, tmpLon{1}});
+fprintf('After cleaning: path rows=%d\n', height(T_path));
+fprintf('Loaded: env rows=%d, path rows=%d\n', height(T_env), height(T_path));
+
+dt_candidates = {'datetime','date','Date','time','Time'};
+dtEnvCols = intersect(dt_candidates, T_env.Properties.VariableNames);
+dtPathCols = intersect(dt_candidates, T_path.Properties.VariableNames);
+hasEnvTime  = ~isempty(dtEnvCols);
+hasPathTime = ~isempty(dtPathCols);
+
+if hasEnvTime
+    try envTimes = datetime(T_env.(dtEnvCols{1})); catch; envTimes = []; 
+        hasEnvTime=false; warning('Failed to parse env datetime.'); end
+else envTimes = []; end
+if hasPathTime
+    try pathTimes = datetime(T_path.(dtPathCols{1})); catch; pathTimes = [];
+        hasPathTime=false; warning('Failed to parse path datetime.'); end
+else pathTimes = []; end
+
+nPath = height(T_path);
+nEnv  = height(T_env);
+mapEnvIdx = zeros(nPath,1);
+if hasEnvTime && hasPathTime
+    for i = 1:nPath
+        [~, mapEnvIdx(i)] = min(abs(envTimes - pathTimes(i)));
+    end
+elseif hasEnvTime && ~hasPathTime
+    for i = 1:nPath, mapEnvIdx(i) = min(i, nEnv); end
+else
+    for i = 1:nPath, mapEnvIdx(i) = min(i, nEnv); end
+end
+
+firstCol = @(cands,names) intersect(cands,names);
+tmp = firstCol({'temp','temperature','Temp','TempMax','TempMin'}, T_env.Properties.VariableNames);
+if ~isempty(tmp), Temp_env = double(T_env.(tmp{1})); else Temp_env = nan(nEnv,1); end
+tmp = firstCol({'humidity','Hum','Humidity'}, T_env.Properties.VariableNames);
+if ~isempty(tmp), Hum_env = double(T_env.(tmp{1})); else Hum_env = nan(nEnv,1); end
+tmp = firstCol({'sealevelpressure','pressure','Pressure'}, T_env.Properties.VariableNames);
+if ~isempty(tmp), Pres_env = double(T_env.(tmp{1})); else Pres_env = nan(nEnv,1); end
+tmp = firstCol({'windspeed','wind_speed','WindSpeed','windspd'}, T_env.Properties.VariableNames);
+if ~isempty(tmp), WindSpd_env = double(T_env.(tmp{1})); else WindSpd_env = nan(nEnv,1); end
+tmp = firstCol({'winddir','wind_dir','windDirection','windbearing'}, T_env.Properties.VariableNames);
+if ~isempty(tmp), WindDir_env = double(T_env.(tmp{1})); else WindDir_env = nan(nEnv,1); end
+
+Temp_env = Temp_env(:); Hum_env = Hum_env(:); Pres_env = Pres_env(:);
+WindSpd_env = WindSpd_env(:); WindDir_env = WindDir_env(:);
+
+tmpLat = firstCol({'lat','latitude','Lat','Latitude'}, T_path.Properties.VariableNames);
+tmpLon = firstCol({'lon','longitude','Lon','Longitude'}, T_path.Properties.VariableNames);
+if isempty(tmpLat) || isempty(tmpLon), error('Path CSV must contain lat/lon columns.'); end
+Lat_all = double(T_path.(tmpLat{1})); Lon_all = double(T_path.(tmpLon{1}));
+Lat_all = Lat_all(:); Lon_all = Lon_all(:);
+
+
+
+
+
+figure('Name','Cyclone Sidr Observed Path','Color','w','Visible','on');
+latLim = [-10 30];
+lonLim = [60 130];
+
+if exist('worldmap','file') == 2
+    worldmap(latLim, lonLim);
+    load coastlines;
+    geoshow(coastlat, coastlon, 'DisplayType','polygon', 'FaceColor',[0.4 0.8 0.4]);
+    setm(gca,'FFaceColor',[0.6 0.85 1]);
+    hold on;
+    geoshow(Lat_all, Lon_all, 'DisplayType','line','Color','k','LineWidth',2);
+    scatterm(Lat_all, Lon_all, 50, 'r', 'filled');
+else
+    plot(Lon_all, Lat_all, '-k','LineWidth',2); hold on;
+    scatter(Lon_all, Lat_all, 50,'r','filled');
+    set(gca,'Color',[0.6 0.85 1]);
+    axis([lonLim latLim]); axis equal;
+    xlabel('Longitude'); ylabel('Latitude');
+    patch([-180 180 180 -180],[-90 -90 90 90],[0.4 0.8 0.4],'EdgeColor','none');
+end
+
+title('Cyclone Sidr Observed Path');
+legend('Observed Path','Observed Points','Location','best');
+grid on;
+
+if all(isnan(Lat_all)) || all(isnan(Lon_all)), error('All lat or lon are NaN — cannot plot.'); end
+fprintf('First 3 observed coords: \n'); disp([Lat_all(1:min(3,end)) Lon_all(1:min(3,end))]);
+
+hasMapping = (exist('worldmap','file') == 2) && (exist('geoshow','file') == 2);
+figure('Name','Cyclone rolling prediction on fixed region','Color','w','Visible','on','Units','normalized','Position',[0.06 0.06 0.88 0.86]);
+
+if hasMapping
+    try
+        worldmap(latLim, lonLim);
+        try
+            load coastlines;
+            geoshow(coastlat, coastlon, 'DisplayType','polygon', 'FaceColor', landColor, 'EdgeColor','none');
+        catch
+        end
+        setm(gca,'FFaceColor', oceanColor);
+        hold on;
+    catch ME
+        warning('Mapping toolbox worldmap failed: %s. Falling back to plain axes.', ME.message);
+        hasMapping = false;
+    end
+end
+
+if ~hasMapping
+    ax = axes('Parent', gcf); hold(ax,'on'); box(ax,'on');
+    try
+        load coast;
+        patch(long, lat, landColor, 'EdgeColor','none');
+    catch
+        set(gca,'Color', oceanColor);
+    end
+    xlim(lonLim); ylim(latLim);
+    axis equal;
+    xlabel('Longitude (°E)'); ylabel('Latitude (°N)');
+end
+
+if hasMapping
+    hObsAll = geoshow(Lat_all, Lon_all, 'DisplayType','line', 'LineStyle', ':', 'Color', [0.2 0.2 0.2], 'LineWidth', 1);
+else
+    hObsAll = plot(Lon_all, Lat_all, ':', 'Color', [0.2 0.2 0.2], 'LineWidth', 1);
+end
+hold on;
+
+hObsLine = []; hObsPts = []; hPredLine = []; hPredPts = []; hInfo = [];
+
+if hasMapping
+    hInfo = textm(latLim(2)-0.8, lonLim(1)+1, '', 'FontSize',12, 'FontWeight', 'bold');
+else
+    hInfo = text(lonLim(1)+1, latLim(2)-0.8, '', 'FontSize',12, 'FontWeight', 'bold');
+end
+
+drawnow;
+
+N = numel(Lat_all);
+for i = 1:N
+    obsLat = Lat_all(1:i);
+    obsLon = Lon_all(1:i);
+    obsT   = (1:i)';
+    envIdx_for_obs = mapEnvIdx(1:i);
+    X_cols = obsT; fNames = {'Time'};
+    if ~all(isnan(Temp_env(envIdx_for_obs))), X_cols = [X_cols, Temp_env(envIdx_for_obs)]; fNames{end+1}='Temp'; end
+    if ~all(isnan(Hum_env(envIdx_for_obs))),  X_cols = [X_cols, Hum_env(envIdx_for_obs)];  fNames{end+1}='Hum'; end
+    if ~all(isnan(Pres_env(envIdx_for_obs))), X_cols = [X_cols, Pres_env(envIdx_for_obs)]; fNames{end+1}='Pres'; end
+    if ~all(isnan(WindSpd_env(envIdx_for_obs))), X_cols = [X_cols, WindSpd_env(envIdx_for_obs)]; fNames{end+1}='WindSpd'; end
+    if ~all(isnan(WindDir_env(envIdx_for_obs))), X_cols = [X_cols, WindDir_env(envIdx_for_obs)]; fNames{end+1}='WindDir'; end
+    
+    doPredict = false; Lat_pred = []; Lon_pred = [];
+    if i >= minPointsToFit
+        X_train = X_cols(1:end-1,:);
+        dLat = diff(obsLat); dLon = diff(obsLon);
+        if size(X_train,1) == numel(dLat) && numel(dLat) >= (minPointsToFit-1)
+            muX = mean(X_train,1); sigX = std(X_train,[],1); sigX(sigX==0)=1;
+            Ztrain = (X_train - muX) ./ sigX;
+            Ztrain = [ones(size(Ztrain,1),1), Ztrain];
+            beta_dlat = (Ztrain' * Ztrain) \ (Ztrain' * dLat);
+            beta_dlon = (Ztrain' * Ztrain) \ (Ztrain' * dLon);
+            doPredict = true;
+        end
+    end
+    
+    if doPredict
+        Tfuture = (obsT(end)+1 : obsT(end)+Hf_future)';
+        m = size(X_cols,2);
+        X_future = zeros(Hf_future, m);
+        for j = 1:m
+            col_j = X_cols(:,j);
+            if numel(unique(obsT))>1 && sum(~isnan(col_j))>=2
+                X_future(:,j) = interp1(obsT, col_j, Tfuture, 'linear', 'extrap');
+            else
+                X_future(:,j) = repmat(col_j(end), Hf_future,1);
+            end
+        end
+        Zf = (X_future - muX) ./ sigX; Zf = [ones(size(Zf,1),1), Zf];
+        dLat_pred = Zf * beta_dlat; dLon_pred = Zf * beta_dlon;
+        Lat_pred = [obsLat(end); obsLat(end) + cumsum(dLat_pred)];
+        Lon_pred = [obsLon(end); obsLon(end) + cumsum(dLon_pred)];
+    end
+    
+    try
+        if ~isempty(hObsLine), delete(hObsLine); end
+        if ~isempty(hObsPts),  delete(hObsPts);  end
+        if ~isempty(hPredLine), delete(hPredLine); end
+        if ~isempty(hPredPts),  delete(hPredPts);  end
+    catch
+    end
+    
+    numSmooth = 200;
+    windowSize = 5;
+    validIdx = find(~isnan(obsLat) & ~isnan(obsLon));
+    if numel(validIdx) >= 2
+        t  = 1:numel(validIdx);
+        tt = linspace(1, numel(validIdx), numSmooth);
+        smoothLat = zeros(size(tt));
+        smoothLon = zeros(size(tt));
+        for k = 1:length(tt)
+            center = round(tt(k));
+            left  = max(1, center - floor(windowSize/2));
+            right = min(numel(validIdx), center + floor(windowSize/2));
+            idxWin = left:right;
+            suml = 0;
+            for iL = 1:length(idxWin)
+                p = 1; q = 1;
+                for jL = 1:length(idxWin)
+                    if iL ~= jL
+                        p = p * (tt(k) - idxWin(jL));
+                        q = q * (idxWin(iL) - idxWin(jL));
+                    end
+                end
+                suml = suml + p * obsLat(validIdx(idxWin(iL))) / q;
+            end
+            smoothLat(k) = suml;
+            suml = 0;
+            for iL = 1:length(idxWin)
+                p = 1; q = 1;
+                for jL = 1:length(idxWin)
+                    if iL ~= jL
+                        p = p * (tt(k) - idxWin(jL));
+                        q = q * (idxWin(iL) - idxWin(jL));
+                    end
+                end
+                suml = suml + p * obsLon(validIdx(idxWin(iL))) / q;
+            end
+            smoothLon(k) = suml;
+        end
+    else
+        smoothLat = obsLat;
+        smoothLon = obsLon;
+    end
+    
+    if hasMapping
+        hObsLine = plotm(smoothLat, smoothLon, '-k', 'LineWidth', 2.2); hold on;
+        hObsPts  = scatterm(obsLat, obsLon, 40, 'k', 'filled');
+    else
+        hObsLine = plot(smoothLon, smoothLat, '-k', 'LineWidth', 2.2); hold on;
+        hObsPts  = scatter(obsLon, obsLat, 40, 'k', 'filled');
+        axis equal;
+        xlim(lonLim); ylim(latLim);
+    end
+    
+    if doPredict && ~isempty(Lat_pred)
+        if hasMapping
+            hPredLine = plotm(Lat_pred, Lon_pred, '-.', 'Color', [1 0 0], 'LineWidth', 2);
+            hPredPts  = scatterm(Lat_pred, Lon_pred, 60, 'r', 'filled');
+        else
+            hPredLine = plot(Lon_pred, Lat_pred, '-.', 'Color', [1 0 0], 'LineWidth', 2);
+            hPredPts  = scatter(Lon_pred, Lat_pred, 60, 'r', 'filled');
+        end
+    end
+    
+    infoStr = sprintf('Step %d / %d', i, N);
+    if doPredict
+        infoStr = [infoStr sprintf('  (predicted %d ahead)', Hf_future)];
+    else
+        infoStr = [infoStr '  (insufficient data to predict)'];
+    end
+    if hasMapping
+        set(hInfo,'String',infoStr);
+    else
+        set(hInfo,'String',infoStr,'Position',[lonLim(1)+0.5, latLim(2)-0.8]);
+    end
+    
+    drawnow;
+    pause(pause_sec);
+end
+
+fprintf('Done rolling predictions across entire observed path.\n');
